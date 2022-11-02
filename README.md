@@ -4,4 +4,4 @@ A simple Queue Bot designed for facilitating Queues for members in the More Bree
 
 ## To run
 
-Place your discord token into line 18 in Queuebot.py. The commands can be accessed using ~help.
+Place your discord token into line 18 in Queuebot.py. The commands can be accessed using .help.
