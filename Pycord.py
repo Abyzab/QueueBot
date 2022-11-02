@@ -1,4 +1,5 @@
 import json
+from multiprocessing import Lock
 import os
 from discord import HTTPException, Forbidden, InvalidArgument
 import discord
@@ -15,13 +16,38 @@ class UserQueue:
         self.host = id
         self.queue = []
         self.closed = False
-        self.maxsize = int(maxsize)
+        self._maxsize = int(maxsize)
         self.custom_id = custom_id
         self.update_queue()
+        self._count = 0
+        self.lock = Lock()
 
     def __getitem__(self, index: int) -> str:
         return self.queue[index]
     
+    @property
+    def maxsize(self) -> int:
+        self.lock.acquire()
+        size = self._maxsize
+        self.lock.release()
+        return size
+    
+    @maxsize.setter
+    def maxsize(self, value) -> None:
+        self.lock.acquire()
+        self._maxsize = int(value)
+        self.lock.release()
+    
+    @property
+    def count(self) -> int:
+        return self._count
+    
+    @count.setter
+    def count(self, value: int) -> None:
+        self.lock.acquire()
+        self._count = value
+        self.lock.release()
+
     def get_code(self) -> str:
         if self.code:
             return self.code
@@ -31,21 +57,30 @@ class UserQueue:
         return linkcode
     
     def set_code(self, code: str) -> None:
+        self.lock.acquire()
         self.code = code
+        self.lock.release()
 
     def size(self) -> int:
-        return len(self.queue)
+        self.lock.acquire()
+        size = len(self.queue)
+        self.lock.release()
+        return size
 
     def index(self, value: int) -> int:
         return self.queue.index(value)
 
     def append(self, item: int) -> bool:
+        self.lock.acquire()
         self.queue.append(item)
         self.update_queue()
+        self.lock.release()
 
     def __delitem__(self, index: int) -> None:
+        self.lock.acquire()
         del self.queue[index]
         self.update_queue()
+        self.lock.release()
 
     def __contains__(self, item: int) -> bool:
         return item in self.queue
@@ -93,7 +128,13 @@ class MainCommands(commands.Cog):
                 if queue.custom_id == id:
                     return queue
         return False
-    
+
+    def correct_channel(ctx: commands.Context) -> bool:
+        command_channel = ctx.bot.get_channel(920484222215553094) # Hard Coded Giveaway-Queue-Commands
+        if ctx.channel == command_channel:
+            return True
+        return False
+
     def check_has_role(self, needed, roles):
         for role in roles:
             if role == needed or role.position > needed.position:
@@ -120,10 +161,10 @@ class MainCommands(commands.Cog):
             await ctx.send("A giveaway already exists with that unique ID.")
             return
 
-        self.queues.append(UserQueue(str(ctx.author.id), maxsize, unique_id.lower(), code))
-        await ctx.send(f"Queue started for {ctx.author.mention}. Use ~q {ctx.author.mention} to join!")
+        self.queues.append(UserQueue(str(ctx.author.id), int(maxsize), unique_id.lower(), code))
+        await ctx.send(f"Queue started for {ctx.author.mention}. Use .q {unique_id} to join!")
     
-    @commands.command(aliases=['r'], description = 
+    @commands.command(aliases=['r'], brief = 
                     "Moves the queue along one person.")
     async def ready(self, ctx: commands.Context):
         queue = self.get_current_queue(ctx.author.id, True)
@@ -136,32 +177,44 @@ class MainCommands(commands.Cog):
             await ctx.send("There's no one to be ready for!")
             return
 
-        front = queue[0]
-        user = self.bot.get_user(front)
+        user = self.bot.get_user(queue[0])
         del queue[0]
 
         if user is None:
-            await ctx.send("User has left the server, please use ~r again.")
+            await ctx.send("User has left the server, please use .r again.")
             return
+
+        next_user = False
         
+        if queue.size() > 0:
+            next_user = self.bot.get_user(queue[0])
+            if next_user is None:
+                del queue[0]
+                return
+
         code = queue.get_code()
 
-        await user.send(f"{ctx.author.display_name} is waiting for you in Global Room {code[:4]}-{code[4:]}")
+        await user.send(f"{ctx.author.mention} is waiting for you in on code: {code[:4]}-{code[4:]}")
         if queue.code:
-            await ctx.author.send(f"{user.display_name} is coming to your Room.")
+            await ctx.send(f"{ctx.author.display_name}, {user.mention} is now up.")
         else:
-            await ctx.author.send(f"{user.display_name} is waiting for you in Global Room {code[:4]}-{code[4:]}")
+            await ctx.author.send(f"{user.mention} is waiting for you on code: {code[:4]}-{code[4:]}")
 
+        await ctx.message.add_reaction("👍")
         await ctx.send("Processing next in queue.")
+        queue.count += 1
 
-
-    @commands.command(aliases=['q', 'queue'], description = 
+        if next_user:
+            await next_user.send(f"Your turn is coming up for the {queue.custom_id} Giveaway next, please be ready.")
+    
+    @commands.check(correct_channel)
+    @commands.command(aliases=['q', 'queue'], brief = 
                                 "Adds you to the host's queue.")
-    async def add_queue(self, ctx: commands.Context, unique_id: str) -> None:
+    async def join(self, ctx: commands.Context, unique_id: str) -> None:
         queue = self.get_current_queue(unique_id.lower())
 
         if not queue:
-            await ctx.send(f"{ctx.author.mention}, that person is not currently hosting.")
+            await ctx.send(f"{ctx.author.mention}, that code does not match any currently running.")
             return
 
         if ctx.author.id in queue:
@@ -172,27 +225,25 @@ class MainCommands(commands.Cog):
             await ctx.send(f"{ctx.author.mention}, that queue is closed. Join failed.")
             return
 
-        if queue.size() == queue.maxsize:
+        if queue.size() >= queue.maxsize:
             await ctx.send(f"{ctx.author.mention}, that queue is full. Join failed.")
             return
         
-        try:
-            await ctx.author.send(f"Testing I can message you. Hello!")
-        except (HTTPException, Forbidden, InvalidArgument):
-            await ctx.send(f"{ctx.author.mention}, please enable direct messages to join the queue. Join failed.")
-            return
+        await ctx.send(f"Added to {unique_id} Giveaway")
+
 
         queue.append(ctx.author.id)
 
         await ctx.send(f"{ctx.author.mention} has been added to the queue. Position: {queue.size()}.")
-
-    @commands.command(aliases=['rq', 'lq', 'ql', 'leavequeue'], description = 
+   
+    @commands.check(correct_channel)
+    @commands.command(aliases=['rq', 'lq', 'ql', 'leavequeue'], brief = 
                                 "Removes you from the queue.")
-    async def remove_queue(self, ctx: commands.Context, unique_id: str) -> None:
+    async def leave_queue(self, ctx: commands.Context, unique_id: str) -> None:
         queue = self.get_current_queue(unique_id.lower())
 
         if not queue:
-            await ctx.send(f"{ctx.author.mention}, that person is not currently hosting.")
+            await ctx.send(f"{ctx.author.mention}, that code does not match any currently running.")
             return
 
         if ctx.author.id not in queue:
@@ -205,13 +256,14 @@ class MainCommands(commands.Cog):
 
         await ctx.send(f"{ctx.author.mention} has been removed from the queue.")
 
-    @commands.command(aliases=['qp', 'pq'], description = 
+    @commands.check(correct_channel)
+    @commands.command(aliases=['qp', 'pq'], brief = 
                                 "Posts your position in the host's queue.")
     async def queue_position(self, ctx: commands.Context, unique_id: str) -> None:
         queue = self.get_current_queue(unique_id.lower())
 
         if not queue:
-            await ctx.send(f"{ctx.author.mention}, that person is not currently hosting.")
+            await ctx.send(f"{ctx.author.mention}, that code does not match any currently running.")
             return
 
         if ctx.author.id not in queue:
@@ -220,20 +272,20 @@ class MainCommands(commands.Cog):
 
         await ctx.send(f"{ctx.author.mention} is in the queue at position {queue.index(ctx.author.id) + 1}.")
 
-    @commands.command(aliases=['qs', 'queuesize'], description = 
+    @commands.command(aliases=['qs', 'queuesize'], brief = 
                                 "Posts the size of the host's queue.")
-    async def current_queue_size(self, ctx: commands.Context, unique_id: str) -> None:
+    async def queue_size(self, ctx: commands.Context, unique_id: str) -> None:
         queue = self.get_current_queue(unique_id.lower())
 
         if not queue:
-            await ctx.send(f"{ctx.author.mention}, that person is not currently hosting.")
+            await ctx.send(f"{ctx.author.mention}, that code does not match any currently running.")
             return
 
         await ctx.send(f"The queue is currently {queue.size()} {'person' if queue.size() == 1 else 'people'}.")
 
-    @commands.command(aliases=['p', 'c', 'pause', 'close'], description = 
+    @commands.command(aliases=['p', 'c', 'pause', 'close'], brief = 
                                 "Closes the host's queue for entry.")
-    async def pause_queue(self, ctx: commands.Context) -> None:
+    async def close_queue(self, ctx: commands.Context) -> None:
         queue = self.get_current_queue(ctx.author.id, True)
 
         if not queue:
@@ -243,7 +295,7 @@ class MainCommands(commands.Cog):
         queue.close_queue()
         await ctx.send(f"Queue for {ctx.author.mention}'s Giveaway has been Closed for Entry.")
 
-    @commands.command(aliases=['o', 'oq', 'open'], description = 
+    @commands.command(aliases=['o', 'oq', 'open'], brief = 
                                 "Opens the host's queue for entry.")
     async def open_queue(self, ctx: commands.Context) -> None:
         queue = self.get_current_queue(ctx.author.id, True)
@@ -255,9 +307,9 @@ class MainCommands(commands.Cog):
         queue.open_queue()
         await ctx.send(f"Queue for {ctx.author.mention}'s Giveaway has been Opened for Entry.")
 
-    @commands.command(aliases=['s', 'stop'], description = 
+    @commands.command(aliases=['s', 'stop'], brief = 
                                 "Stops the Giveaway completely and removes it.")
-    async def close_queue(self, ctx: commands.Context) -> None:
+    async def clear_queue(self, ctx: commands.Context) -> None:
         queue = self.get_current_queue(ctx.author.id, True)
 
         if not queue:
@@ -268,7 +320,7 @@ class MainCommands(commands.Cog):
         self.queues.remove(queue)
         await ctx.send(f"Queue for {ctx.author.mention}'s Giveaway has been Cleared and Stopped.")
     
-    @commands.command(aliases=['cc', 'code', 'setcode'], description = 
+    @commands.command(aliases=['cc', 'code', 'setcode'], brief = 
                                 "Allows the Host to change the Linkcode for the Room.")
     async def change_code(self, ctx: commands.Context, code:str) -> None:
         await ctx.message.delete()
@@ -327,7 +379,29 @@ class MainCommands(commands.Cog):
             embed['description'] += f'{i+1}. {user.mention}\n'
         
         await ctx.send(embed=Embed.from_dict(embed))
-    
+
+
+    @commands.command(aliases=['remove', 'ru'], hidden=True)
+    async def remove_user(self, ctx: commands.Context, member: discord.Member = None) -> None:
+        queue = self.get_current_queue(ctx.author.id, True)
+
+        if not queue:
+            await ctx.send(f"You're not currently hosting a Giveaway.")
+            return
+
+        if queue.size() == 0:
+            await ctx.send(f"This queue has no one in it!")
+            return
+        
+        id = member.id
+        if member.id not in queue:
+            await ctx.send("That user isn't in the queue.")
+            return
+        
+        del queue[queue.index(id)]
+        await ctx.send(f"{member.mention} has been removed from the queue.")
+
+
     @commands.command(aliases=['aq'], hidden=True)
     async def active_queues(self, ctx: commands.Context) -> None:
 
@@ -350,9 +424,45 @@ class MainCommands(commands.Cog):
 
         for i in range(len(self.queues)):
             queue = self.bot.get_user(int(self.queues[i].host))
-            embed['description'] += f'{i+1}. {queue}\n'
+            embed['description'] += f'{i+1}. {queue} - {self.queues[i].custom_id} : {self.queues[i].size()} {"person" if self.queues[i].size() == 1 else "people"} in line.\n'
 
         await ctx.send(embed=Embed.from_dict(embed))
+    
+    @commands.command(aliases=['sent'], brief = "Displays the trades completed by host.")
+    async def trades_sent(self, ctx: commands.Context) -> None:
+        
+        queue = self.get_current_queue(ctx.author.id, True)
+
+        if not queue:
+            await ctx.send(f"{ctx.author.mention}, you're not currently hosting a Giveaway.")
+            return
+        
+        await ctx.send(f"{queue.count} {'trade' if queue.count == 1 else 'trades'} completed.")
+
+
+
+    @commands.command(aliases=['cs', 'size'], brief = "Changes the maxsize of the queue.")
+    async def change_size(self, ctx: commands.Context, maxsize: str) -> None:
+
+        queue = self.get_current_queue(ctx.author.id, True)
+
+        if not queue:
+            await ctx.send(f"{ctx.author.mention}, you're not currently hosting a Giveaway.")
+            return
+
+        queue.maxsize = int(maxsize)
+
+        await ctx.send(f"{ctx.author.mention}, queue maxsize updated.")
+
+    # Error Handling
+
+    @join.error
+    @leave_queue.error
+    @queue_position.error
+    async def check_errors(self, error, ctx: commands.Context) -> None:
+        print(type(error))
+        if isinstance(error, commands.CheckFailure):
+            await ctx.channel.send(f"{ctx.author.mention}, you can't use that in this channel.")
 
 
 def setup(bot):
