@@ -5,7 +5,7 @@ import asyncio
 class PycordManager(commands.Bot):
     def __init__(self) -> None:
         intents = discord.Intents().all()
-        super().__init__(command_prefix='~', intents=intents, case_insensitive=True)
+        super().__init__(command_prefix='.', intents=intents, case_insensitive=True)
         self.load_extension('Pycord')
 
     async def on_ready(self) -> None:
